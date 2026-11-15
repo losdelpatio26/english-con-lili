@@ -113,9 +113,11 @@ function highlightAt(charIndex){clearHighlight();let current=document.querySelec
 let activeVisualTimers=[];
 function stop(){token++;activeVisualTimers.forEach(clearTimeout);activeVisualTimers=[];clearHighlight();speechSynthesis.cancel();if(timeoutId)clearTimeout(timeoutId);timeoutId=null;$('status').textContent='Reproducción detenida.'}
 function availableEnglishVoices(){
- // Prioridad Canadá, luego EE. UU.; nunca voces británicas por defecto.
- return speechSynthesis.getVoices().filter(v=>/^en-(CA|US)$/i.test(v.lang))
-   .sort((a,b)=>(/^en-CA$/i.test(b.lang)?1:0)-(/^en-CA$/i.test(a.lang)?1:0)||a.name.localeCompare(b.name));
+ // Android puede exponer en, en-GB, en-AU o identificadores regionales variados.
+ // Preferimos Canadá y EE. UU., sin bloquear las demás voces inglesas.
+ const rank=v=>/^en-CA$/i.test(v.lang)?0:/^en-US$/i.test(v.lang)?1:/^en(?:-|$)/i.test(v.lang)?2:3;
+ return speechSynthesis.getVoices().filter(v=>/^en(?:-|$)/i.test(v.lang))
+   .sort((a,b)=>rank(a)-rank(b)||a.name.localeCompare(b.name));
 }
 const femaleVoiceNames=/\b(samantha|victoria|karen|moira|tessa|fiona|ava|allison|susan|zira|hazel|aria|jenny|sonia|natasha|olivia|emma|serena|joanna|salli|kimberly|kendra|ivy|amy|nicole|raveena|female|woman)\b/i;
 const maleVoiceNames=/\b(daniel|alex|fred|tom|david|mark|george|james|ryan|guy|matthew|joey|justin|brian|kevin|arthur|oliver|male|man)\b/i;
@@ -125,28 +127,32 @@ function refreshVoices(){
  const women=voices.filter(v=>femaleVoiceNames.test(v.name)&&!maleVoiceNames.test(v.name));
  const men=voices.filter(v=>maleVoiceNames.test(v.name)&&!femaleVoiceNames.test(v.name));
  const used=new Set();
- const take=pool=>{const found=pool.find(v=>!used.has(v));if(found)used.add(found);return found||null};
- // Intentar incluir una voz canadiense y una estadounidense cuando ambas existan.
+ const take=pool=>{const v=pool.find(x=>!used.has(x));if(v)used.add(v);return v||null};
  const ca=voices.filter(v=>/^en-CA$/i.test(v.lang)),us=voices.filter(v=>/^en-US$/i.test(v.lang));
- const pickGender=(pool,gender)=>pool.filter(v=>(gender==='f'?women:men).includes(v));
- fourVoiceSlots=[take(pickGender(ca,'f'))||take(women),take(pickGender(us,'f'))||take(women),take(pickGender(ca,'m'))||take(men),take(pickGender(us,'m'))||take(men)];
- // Si el motor no revela el género, mostrar igualmente sus voces norteamericanas.
+ const select=(region,gender)=>take(region.filter(v=>(gender==='f'?women:men).includes(v)))||take(gender==='f'?women:men);
+ fourVoiceSlots=[select(ca,'f'),select(us,'f'),select(ca,'m'),select(us,'m')];
+ // Las voces sin género identificable se ofrecen por su nombre real, sin atribuirles género.
  for(let i=0;i<4;i++)if(!fourVoiceSlots[i])fourVoiceSlots[i]=take(voices);
  el.replaceChildren();
- ['Mujer 1','Mujer 2','Hombre 1','Hombre 2'].forEach((label,i)=>{
-   const v=fourVoiceSlots[i];const opt=new Option(label+(v?' · '+v.name+' ('+v.lang+')':' · no disponible'),String(i));opt.disabled=!v;el.add(opt);
+ fourVoiceSlots.forEach((v,i)=>{
+  if(!v)return;
+  const gender=women.includes(v)?'Mujer':men.includes(v)?'Hombre':'Voz';
+  el.add(new Option(gender+' · '+v.name+' ('+v.lang+')',String(i)));
  });
+ // Si Android no expone la lista, permitir la voz predeterminada del motor TTS.
+ if(!voices.length)el.add(new Option('Inglés · voz predeterminada del dispositivo','auto'));
  const saved=(()=>{try{return localStorage.getItem('liliNarratorVoice')}catch{return null}})();
- const valid=[previous,saved].find(x=>x!=null&&/^[0-3]$/.test(x)&&fourVoiceSlots[Number(x)]);
- const first=fourVoiceSlots.findIndex(Boolean);
- if(valid!==undefined)el.value=valid;else if(first>=0)el.value=String(first);else el.selectedIndex=-1;
- $('voiceinfo').textContent=first<0?'El navegador aún no ha cargado voces en-CA o en-US. Pulsa Actualizar voces o revisa la configuración de texto a voz.':
-  'Voces norteamericanas disponibles: '+voices.filter(v=>/^en-CA$/i.test(v.lang)).length+' canadienses (en-CA) y '+voices.filter(v=>/^en-US$/i.test(v.lang)).length+' estadounidenses (en-US).';
+ const valid=[previous,saved].find(x=>[...el.options].some(o=>o.value===x));
+ el.value=valid!==undefined?valid:el.options[0].value;
+ $('voiceinfo').textContent=voices.length?
+  'Voces inglesas detectadas: '+voices.length+'. Prioridad: Canadá y Estados Unidos.':
+  'Chrome no muestra una lista de voces. Se intentará la voz inglesa predeterminada del dispositivo.';
 }
 function voice(){const choice=$('narrator').value;return /^[0-3]$/.test(choice)?fourVoiceSlots[Number(choice)]||null:null}
+function canSpeakEnglish(){return 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window}
 
 function speakCurrent(guided=false){
- stop();if(!voice()){$('status').textContent='No hay voces en-CA ni en-US disponibles en este navegador. Pulsa Actualizar voces.';return;}lastMode=guided;let mine=token;
+ stop();if(!canSpeakEnglish()){$('status').textContent='Este navegador no admite narración por voz.';return;}lastMode=guided;let mine=token;
  const run=()=>{
   if(mine!==token)return;
   const phrase=stories[storyIndex].lines[idx][0],rate=Number($('speed').value),v=voice();
@@ -158,7 +164,7 @@ function speakCurrent(guided=false){
    $('status').textContent='Tu turno: repite en voz alta.';
    timeoutId=setTimeout(()=>{if(mine!==token)return;if($('loop').checked)run();else if(idx<stories[storyIndex].lines.length-1){idx++;render();run()}else $('status').textContent='¡Muy bien! Has terminado esta historia.'},Number($('pause').value));
   };
-  const makeUtterance=text=>{let u=new SpeechSynthesisUtterance(text);u.lang=v?.lang||'en-CA';u.rate=rate;if(v)u.voice=v;return u};
+  const makeUtterance=text=>{let u=new SpeechSynthesisUtterance(text);u.lang=v?.lang||'en-US';u.rate=rate;if(v)u.voice=v;return u};
   // Android: una sola oración conserva la voz natural. Los eventos boundary
   // tienen prioridad; si faltan, un reloj visual estimado mueve el amarillo.
   const matches=[...phrase.matchAll(/[\p{L}]+(?:[’'][\p{L}]+)*/gu)];
@@ -290,7 +296,7 @@ render();drawQuiz();
   const nativeStop=stop;
   stop=function(){playbackId++;cancelTimers();currentUtterance=null;nativeStop()};
   function fullStory(){
-    stop();if(!voice()){$('status').textContent='No hay voces en-CA ni en-US disponibles en este navegador. Pulsa Actualizar voces.';return;}lastMode=null;
+    stop();if(!canSpeakEnglish()){$('status').textContent='Este navegador no admite narración por voz.';return;}lastMode=null;
     const runId=++playbackId,storyId=storyIndex;
     const lines=stories[storyId].lines.map(l=>l[0]);
     const offsets=[];let text='';
@@ -299,7 +305,7 @@ render();drawQuiz();
     const rate=Number(document.getElementById('speed').value);
     const voiceChoice=voice();
     const u=new SpeechSynthesisUtterance(text);
-    u.lang=voiceChoice?.lang||'en-CA';u.rate=rate;if(voiceChoice)u.voice=voiceChoice;
+    u.lang=voiceChoice?.lang||'en-US';u.rate=rate;if(voiceChoice)u.voice=voiceChoice;
     currentUtterance=u;
     let gotBoundary=false,visualStarted=false;
     const audioKey=storyId+':'+rate+':'+(voiceChoice?voiceChoice.name:'default');
